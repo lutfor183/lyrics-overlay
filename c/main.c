@@ -2,6 +2,7 @@
 #include <glib/gstdio.h>
 #include <string.h>
 #include <math.h>
+#include <malloc.h>
 #include "common.h"
 #include "overlay.h"
 #include "mpris.h"
@@ -350,6 +351,11 @@ static void on_activate(GtkApplication *app, gpointer ud) {
   gtk_window_present(overlay_window(G.win));
 }
 int main(int argc, char **argv) {
+  /* This window is a small text label redrawn a few times per minute.
+     GPU renderers (Mesa/LLVM ~60MB) buy nothing here; software canvas
+     uses a fraction of the RAM for unmeasurable CPU. */
+  g_setenv("GSK_RENDERER", "cairo", FALSE);
+  mallopt(M_ARENA_MAX, 2);
   gboolean write_defaults = FALSE, no_cache = FALSE, version = FALSE;
   char *font_family = NULL, *text_color = NULL, *bg_color = NULL;
   int font_size = -1, width = -1, lines = -1;
