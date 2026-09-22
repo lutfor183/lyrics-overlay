@@ -6,6 +6,7 @@ struct Tracker {
   GDBusConnection *bus;
   GPtrArray *players; /* Player*, canonical state, lock-guarded */
   GMutex lock;
+  GCond cond;
   GThread *thread;
   volatile gboolean run;
   volatile gboolean names_dirty, meta_dirty, resync_request;
@@ -133,7 +134,11 @@ static void on_name_owner(GDBusConnection *c, const char *sender, const char *pa
                           const char *iface, const char *sig, GVariant *params,
                           gpointer ud) {
   (void)c; (void)sender; (void)path; (void)iface; (void)sig; (void)params;
-  ((Tracker *)ud)->names_dirty = TRUE;
+  Tracker *tt = (Tracker *)ud;
+  g_mutex_lock(&tt->lock);
+  tt->names_dirty = TRUE;
+  g_cond_signal(&tt->cond);
+  g_mutex_unlock(&tt->lock);
   mpris_poke();
 }
 static void on_props(GDBusConnection *c, const char *sender, const char *path,
@@ -142,41 +147,57 @@ static void on_props(GDBusConnection *c, const char *sender, const char *path,
   (void)c; (void)path; (void)iface; (void)sig; (void)params;
   Tracker *t = ud;
   if (!sender || strncmp(sender, "org.mpris.MediaPlayer2.", 23)) return;
+  g_mutex_lock(&t->lock);
   t->meta_dirty = TRUE;
-  t->resync_request = TRUE; /* event: authoritative re-read within ~250ms */
+  t->resync_request = TRUE; /* event: authoritative re-read immediately */
+  g_cond_signal(&t->cond);
+  g_mutex_unlock(&t->lock);
   mpris_poke();
 }
 
 static gpointer tracker_loop(gpointer ud) {
   Tracker *t = ud;
+  gint64 last_names = 0, last_meta = 0, last_pos = 0;
+  g_mutex_lock(&t->lock);
   while (t->run) {
-    /* names: on signal or every ~60s */
-    if (t->names_dirty || t->nloops % 240 == 0)
-      tracker_refresh(t);
-    t->names_dirty = FALSE;
-    if (t->resync_request) {
-      /* event (play/seek/track/signal): authoritative re-read now */
-      tracker_read_meta(t);
-      tracker_read_positions(t);
-      t->resync_request = FALSE;
-      t->meta_dirty = FALSE;
-    } else {
-      /* meta: on signal or every ~5s (cheap, catches missed signals) */
-      if (t->meta_dirty || t->nloops % 20 == 0)
-        tracker_read_meta(t);
-      t->meta_dirty = FALSE;
-      /* position: cheap fast read, but the timestamp only moves when the
-         VALUE moves. limusic's MPRIS position freezes 2-3s then jumps;
-         anchoring to a frozen read would make lyrics 2s late. */
-      tracker_read_positions(t);
+    gint64 now = g_get_monotonic_time();
+    int rms = t->resync_ms > 1000 ? t->resync_ms : 5000;
+    gboolean names = t->names_dirty || now - last_names > 60 * G_USEC_PER_SEC;
+    gboolean meta = t->meta_dirty || t->resync_request || now - last_meta > 5 * G_USEC_PER_SEC;
+    gboolean pos = t->resync_request || now - last_pos > (gint64)rms * 1000;
+    t->names_dirty = t->meta_dirty = t->resync_request = FALSE;
+    if (!names && !meta && !pos) {
+      /* nothing due: sleep until the next due time or a signal poke */
+      gint64 wake = last_meta + 5 * G_USEC_PER_SEC;
+      if (last_pos + (gint64)rms * 1000 < wake) wake = last_pos + (gint64)rms * 1000;
+      if (last_names + 60 * G_USEC_PER_SEC < wake) wake = last_names + 60 * G_USEC_PER_SEC;
+      if (wake < now + G_USEC_PER_SEC) wake = now + G_USEC_PER_SEC;
+      g_cond_wait_until(&t->cond, &t->lock, wake);
+      continue;
     }
-    t->nloops++;
-    g_usleep(250 * 1000);
+    g_mutex_unlock(&t->lock);
+    if (names) { tracker_refresh(t); last_names = g_get_monotonic_time(); }
+    if (meta) { tracker_read_meta(t); last_meta = g_get_monotonic_time(); }
+    if (pos) { tracker_read_positions(t); last_pos = g_get_monotonic_time(); }
+    g_mutex_lock(&t->lock);
   }
+  g_mutex_unlock(&t->lock);
   return NULL;
 }
-void tracker_request_resync(Tracker *t) { if (t) t->resync_request = TRUE; }
-void tracker_set_resync_ms(Tracker *t, int ms) { if (t) t->resync_ms = ms; }
+void tracker_request_resync(Tracker *t) {
+  if (!t) return;
+  g_mutex_lock(&t->lock);
+  t->resync_request = TRUE;
+  g_cond_signal(&t->cond);
+  g_mutex_unlock(&t->lock);
+}
+void tracker_set_resync_ms(Tracker *t, int ms) {
+  if (!t) return;
+  g_mutex_lock(&t->lock);
+  t->resync_ms = ms;
+  g_cond_signal(&t->cond);
+  g_mutex_unlock(&t->lock);
+}
 /* non-blocking copy of the active player for the UI tick; 0 = keep last */
 int tracker_try_active(Tracker *t, Player *out) {
   if (!g_mutex_trylock(&t->lock)) return 0;
@@ -238,6 +259,7 @@ void tracker_copy_free(Player *p) {
 Tracker *tracker_new(GDBusConnection *bus) {
   Tracker *t = g_new0(Tracker, 1);
   g_mutex_init(&t->lock);
+  g_cond_init(&t->cond);
   t->bus = g_object_ref(bus);
   t->players = g_ptr_array_new_with_free_func((GDestroyNotify)player_free);
   t->name_sub = g_dbus_connection_signal_subscribe(
@@ -254,8 +276,12 @@ Tracker *tracker_new(GDBusConnection *bus) {
 }
 void tracker_free(Tracker *t) {
   if (!t) return;
+  g_mutex_lock(&t->lock);
   t->run = FALSE;
+  g_cond_signal(&t->cond);
+  g_mutex_unlock(&t->lock);
   if (t->thread) g_thread_join(t->thread);
+  g_cond_clear(&t->cond);
   g_dbus_connection_signal_unsubscribe(t->bus, t->name_sub);
   g_dbus_connection_signal_unsubscribe(t->bus, t->prop_sub);
   g_ptr_array_free(t->players, TRUE);

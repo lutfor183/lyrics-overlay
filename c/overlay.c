@@ -56,13 +56,14 @@ static GtkWidget *mklabel(const char *cls, gboolean one) {
   gtk_label_set_justify(GTK_LABEL(lb), GTK_JUSTIFY_CENTER);
   gtk_widget_set_halign(lb, GTK_ALIGN_CENTER);
   gtk_widget_set_valign(lb, GTK_ALIGN_CENTER);
-  if (one) {
-    gtk_label_set_wrap(GTK_LABEL(lb), FALSE);
-    gtk_label_set_single_line_mode(GTK_LABEL(lb), TRUE);
-    gtk_label_set_ellipsize(GTK_LABEL(lb), PANGO_ELLIPSIZE_END);
-  } else {
-    gtk_label_set_wrap(GTK_LABEL(lb), TRUE);
-  }
+  (void)one;
+  /* every label wraps on words: long lines grow taller instead of
+     degrading into "..." */
+  gtk_label_set_wrap(GTK_LABEL(lb), TRUE);
+  gtk_label_set_wrap_mode(GTK_LABEL(lb), PANGO_WRAP_WORD_CHAR);
+  gtk_label_set_single_line_mode(GTK_LABEL(lb), FALSE);
+  gtk_label_set_ellipsize(GTK_LABEL(lb), PANGO_ELLIPSIZE_NONE);
+  gtk_label_set_lines(GTK_LABEL(lb), -1);
   return lb;
 }
 static void apply_mode(Overlay *o) {
@@ -180,11 +181,13 @@ void overlay_refresh(Overlay *o, Settings *s) {
 static void refit(Overlay *o) {
   int minw = 0, natw = 0;
   gtk_widget_measure(o->cur, GTK_ORIENTATION_HORIZONTAL, -1, &minw, &natw, NULL, NULL);
-  int minh = 0, nath = 0;
-  gtk_widget_measure(o->root, GTK_ORIENTATION_VERTICAL, natw, &minh, &nath, NULL, NULL);
   int cap = o->s->width > 200 ? o->s->width : 200;
   int w = natw + 36;
   if (w > cap) w = cap;
+  /* height measured AT the final width: a long line wraps onto more rows
+     and the window grows instead of clipping it */
+  int minh = 0, nath = 0;
+  gtk_widget_measure(o->root, GTK_ORIENTATION_VERTICAL, w, &minh, &nath, NULL, NULL);
   gtk_window_set_default_size(GTK_WINDOW(o->win), w, nath);
 }
 static void present(Overlay *o) {
@@ -256,14 +259,28 @@ typedef struct {
             *bgcolor,
             *cache, *sync;
 } Dlg;
-static void dlg_row(GtkWidget *grid, int row, const char *label, GtkWidget *w) {
+static void dlg_section(GtkWidget *grid, int row, const char *title) {
+  GtkWidget *l = gtk_label_new(NULL);
+  char *m = g_markup_printf_escaped("<b>%s</b>", title);
+  gtk_label_set_markup(GTK_LABEL(l), m);
+  g_free(m);
+  gtk_widget_set_halign(l, GTK_ALIGN_START);
+  if (row) gtk_widget_set_margin_top(l, 10);
+  gtk_grid_attach(GTK_GRID(grid), l, 0, row, 2, 1);
+  GtkWidget *sep = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+  gtk_widget_set_margin_bottom(sep, 2);
+  gtk_grid_attach(GTK_GRID(grid), sep, 0, row + 1, 2, 1);
+}
+static void dlg_row(GtkWidget *grid, int row, const char *label, GtkWidget *w,
+                    gboolean fill) {
   GtkWidget *l = gtk_label_new(label);
   gtk_widget_set_halign(l, GTK_ALIGN_START);
   gtk_widget_set_valign(l, GTK_ALIGN_CENTER);
-  gtk_widget_set_size_request(l, 150, -1);
+  gtk_widget_set_size_request(l, 170, -1);
   gtk_grid_attach(GTK_GRID(grid), l, 0, row, 1, 1);
-  gtk_widget_set_halign(w, GTK_ALIGN_END);
   gtk_widget_set_hexpand(w, TRUE);
+  gtk_widget_set_halign(w, fill ? GTK_ALIGN_FILL : GTK_ALIGN_END);
+  if (fill) gtk_widget_set_size_request(w, 220, -1);
   gtk_grid_attach(GTK_GRID(grid), w, 1, row, 1, 1);
 }
 static int parse_rrggbbaa(const char *s, GdkRGBA *out) {
@@ -356,7 +373,7 @@ static void show_settings(Overlay *o) {
   gtk_window_set_title(GTK_WINDOW(d->dlg), "Lyrics Overlay Settings");
   gtk_window_set_transient_for(GTK_WINDOW(d->dlg), GTK_WINDOW(o->win));
   gtk_window_set_modal(GTK_WINDOW(d->dlg), TRUE);
-  gtk_window_set_default_size(GTK_WINDOW(d->dlg), 400, 560);
+  gtk_window_set_default_size(GTK_WINDOW(d->dlg), 480, 620);
   GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
   gtk_widget_set_margin_top(box, 12); gtk_widget_set_margin_bottom(box, 12);
   gtk_widget_set_margin_start(box, 12); gtk_widget_set_margin_end(box, 12);
@@ -365,35 +382,42 @@ static void show_settings(Overlay *o) {
   gtk_widget_set_vexpand(scroll, TRUE);
   gtk_box_append(GTK_BOX(box), scroll);
   GtkWidget *grid = gtk_grid_new();
-  gtk_grid_set_row_spacing(GTK_GRID(grid), 8);
-  gtk_grid_set_column_spacing(GTK_GRID(grid), 8);
+  gtk_grid_set_row_spacing(GTK_GRID(grid), 6);
+  gtk_grid_set_column_spacing(GTK_GRID(grid), 12);
   gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), grid);
+  gtk_widget_set_size_request(scroll, 440, 470);
+  dlg_section(grid, 0, "Lyrics");
+  dlg_section(grid, 4, "Text");
+  dlg_section(grid, 10, "Background");
+  dlg_section(grid, 14, "Window");
+  dlg_section(grid, 19, "Updates");
+  dlg_section(grid, 23, "Behavior");
   const char *L[][2] = { {"1", "Single line"}, {"3", "3-line (prev/cur/next)"} };
   d->lines = combo(L, 2, s->lines == 3 ? "3" : "1");
-  dlg_row(grid, 0, "Lines", d->lines);
+  dlg_row(grid, 2, "Lines", d->lines, 1);
   const char *S[][2] = { {"auto", "Auto (best match)"}, {"local", "My .lrc files"},
     {"limusic", "limusic match"}, {"mpris", "From player"},
     {"boidu", "Boidu"}, {"lrclib", "LRCLIB"},
     {"netease", "Netease"}, {"qq", "QQ"}, {"kugou", "Kugou"} };
   d->src = combo(S, 9, s->source ? s->source : "auto");
-  dlg_row(grid, 1, "Lyrics source", d->src);
+  dlg_row(grid, 3, "Lyrics source", d->src, 1);
   d->font = gtk_entry_new();
   gtk_editable_set_text(GTK_EDITABLE(d->font), s->font_family);
-  dlg_row(grid, 2, "Font family", d->font);
+  dlg_row(grid, 6, "Font family", d->font, 1);
   d->fsize = gtk_spin_button_new_with_range(10, 72, 1);
   gtk_spin_button_set_value(GTK_SPIN_BUTTON(d->fsize), s->font_size);
-  dlg_row(grid, 3, "Font size", d->fsize);
+  dlg_row(grid, 7, "Font size", d->fsize, 1);
   d->scale = gtk_spin_button_new_with_range(0.3, 2.0, 0.05);
   gtk_spin_button_set_value(GTK_SPIN_BUTTON(d->scale), s->secondary_scale);
-  dlg_row(grid, 4, "Secondary scale", d->scale);
+  dlg_row(grid, 8, "Secondary scale", d->scale, 1);
   d->color = gtk_color_button_new();
   GdkRGBA rgba;
   if (gdk_rgba_parse(&rgba, s->text_color)) gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(d->color), &rgba);
-  dlg_row(grid, 5, "Text color", d->color);
+  dlg_row(grid, 9, "Text color", d->color, 0);
   const char *B[][2] = { {"transparent", "Fully transparent"}, {"minimal_dark", "Minimal dark shade"},
     {"light", "Light shade"}, {"custom", "Custom color"} };
   d->bg = combo(B, 4, s->bg_mode);
-  dlg_row(grid, 6, "Background", d->bg);
+  dlg_row(grid, 12, "Background", d->bg, 1);
   d->bgcolor = gtk_color_button_new();
   gtk_color_chooser_set_use_alpha(GTK_COLOR_CHOOSER(d->bgcolor), TRUE);
   {
@@ -404,7 +428,7 @@ static void show_settings(Overlay *o) {
   }
   gtk_widget_set_tooltip_text(d->bgcolor,
       "Used when Background is Custom color (alpha = transparency)");
-  dlg_row(grid, 7, "Custom background", d->bgcolor);
+  dlg_row(grid, 13, "Custom background", d->bgcolor, 0);
   {
     const char *bv = gtk_combo_box_get_active_id(GTK_COMBO_BOX(d->bg));
     gtk_widget_set_sensitive(d->bgcolor, bv && !strcmp(bv, "custom"));
@@ -412,28 +436,28 @@ static void show_settings(Overlay *o) {
   g_signal_connect(d->bg, "changed", G_CALLBACK(bg_changed), d);
   d->width = gtk_spin_button_new_with_range(200, 1200, 10);
   gtk_spin_button_set_value(GTK_SPIN_BUTTON(d->width), s->width);
-  dlg_row(grid, 8, "Window width", d->width);
+  dlg_row(grid, 16, "Window width", d->width, 1);
   const char *A[][2] = { {"bottom", "Bottom"}, {"top", "Top"} };
   d->anchor = combo(A, 2, s->anchor);
-  dlg_row(grid, 9, "Anchor", d->anchor);
+  dlg_row(grid, 17, "Anchor", d->anchor, 1);
   d->margin = gtk_spin_button_new_with_range(0, 200, 1);
   gtk_spin_button_set_value(GTK_SPIN_BUTTON(d->margin), s->margin);
-  dlg_row(grid, 10, "Margin", d->margin);
+  dlg_row(grid, 18, "Margin", d->margin, 1);
   d->poll = gtk_spin_button_new_with_range(1000, 30000, 1000);
   gtk_spin_button_set_value(GTK_SPIN_BUTTON(d->poll), s->resync_ms);
-  dlg_row(grid, 11, "Position resync (ms)", d->poll);
+  dlg_row(grid, 21, "Position resync (ms)", d->poll, 1);
   d->autohide = gtk_switch_new();
   gtk_switch_set_active(GTK_SWITCH(d->autohide), s->autohide);
-  dlg_row(grid, 12, "Autohide", d->autohide);
+  dlg_row(grid, 25, "Autohide", d->autohide, 0);
   d->timeout = gtk_spin_button_new_with_range(1, 30, 1);
   gtk_spin_button_set_value(GTK_SPIN_BUTTON(d->timeout), s->autohide_timeout);
-  dlg_row(grid, 13, "Autohide timeout (s)", d->timeout);
+  dlg_row(grid, 26, "Autohide timeout (s)", d->timeout, 1);
   d->cache = gtk_switch_new();
   gtk_switch_set_active(GTK_SWITCH(d->cache), s->cache);
-  dlg_row(grid, 15, "Cache lyrics", d->cache);
+  dlg_row(grid, 27, "Cache lyrics", d->cache, 0);
   d->sync = gtk_spin_button_new_with_range(-2000, 2000, 50);
   gtk_spin_button_set_value(GTK_SPIN_BUTTON(d->sync), s->sync_offset_ms);
-  dlg_row(grid, 16, "Show early (ms)", d->sync);
+  dlg_row(grid, 22, "Show early (ms)", d->sync, 1);
   GtkWidget *btns = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
   gtk_widget_set_halign(btns, GTK_ALIGN_END);
   gtk_box_append(GTK_BOX(box), btns);
