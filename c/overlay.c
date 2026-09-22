@@ -86,8 +86,13 @@ static void on_drag_begin(GtkGestureDrag *g, double x, double y, gpointer ud) {
   app_log("drag: move started");
 }
 static void show_settings(Overlay *o);
-static void show_settings_later(GtkButton *b, gpointer ud);
+static void show_settings_later(Overlay *o);
 static void on_menu_closed(GtkPopover *pop, gpointer ud);
+static void dismiss_menu(GtkButton *b, gpointer ud) {
+  (void)b;
+  Overlay *o = ud;
+  if (o->menu) gtk_popover_popdown(GTK_POPOVER(o->menu));
+}
 static void menu_row(GtkWidget *box, const char *icon, const char *label,
                        GCallback fn, gpointer ud, Overlay *o) {
   GtkWidget *b = gtk_button_new();
@@ -102,8 +107,8 @@ static void menu_row(GtkWidget *box, const char *icon, const char *label,
   gtk_box_append(GTK_BOX(row), lb);
   gtk_button_set_child(GTK_BUTTON(b), row);
   /* dismiss first so the action's window (e.g. Settings) is never trapped
-     under the menu's grab */
-  g_signal_connect_swapped(b, "clicked", G_CALLBACK(gtk_popover_popdown), o->menu);
+     under the menu's grab; resolved at click time, not build time */
+  g_signal_connect(b, "clicked", G_CALLBACK(dismiss_menu), o);
   g_signal_connect_swapped(b, "clicked", fn, ud);
   gtk_box_append(GTK_BOX(box), b);
 }
@@ -111,9 +116,8 @@ static void on_right(GtkGestureClick *g, int n, double x, double y, gpointer ud)
   (void)g; (void)n;
   Overlay *o = ud;
   if (o->menu) {
+    /* the closed handler unparents exactly once */
     gtk_popover_popdown(GTK_POPOVER(o->menu));
-    gtk_widget_unparent(o->menu);
-    o->menu = NULL;
   }
   GtkWidget *pop = gtk_popover_new();
   GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
@@ -155,10 +159,9 @@ static void on_right(GtkGestureClick *g, int n, double x, double y, gpointer ud)
   o->menu = pop;
   app_log("menu: popped");
 }
-static void show_settings_later(GtkButton *b, gpointer ud) {
-  (void)b;
+static void show_settings_later(Overlay *o) {
   /* run after the menu fully dismisses so its grab is gone */
-  ((Overlay *)ud)->settings_queued = TRUE;
+  o->settings_queued = TRUE;
 }
 static void on_menu_closed(GtkPopover *pop, gpointer ud) {
   Overlay *o = ud;
