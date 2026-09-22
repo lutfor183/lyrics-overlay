@@ -160,18 +160,15 @@ static gpointer tracker_loop(gpointer ud) {
       tracker_read_positions(t);
       t->resync_request = FALSE;
       t->meta_dirty = FALSE;
-      t->last_pos_loop = t->nloops;
     } else {
       /* meta: on signal or every ~5s (cheap, catches missed signals) */
       if (t->meta_dirty || t->nloops % 20 == 0)
         tracker_read_meta(t);
       t->meta_dirty = FALSE;
-      /* position: only on the slow resync cadence; the UI interpolates */
-      int rms = t->resync_ms > 500 ? t->resync_ms : 5000;
-      if ((t->nloops - t->last_pos_loop) * 250 >= (unsigned)rms) {
-        tracker_read_positions(t);
-        t->last_pos_loop = t->nloops;
-      }
+      /* position: cheap fast read, but the timestamp only moves when the
+         VALUE moves. limusic's MPRIS position freezes 2-3s then jumps;
+         anchoring to a frozen read would make lyrics 2s late. */
+      tracker_read_positions(t);
     }
     t->nloops++;
     g_usleep(250 * 1000);
@@ -203,6 +200,36 @@ int tracker_try_active(Tracker *t, Player *out) {
   }
   g_mutex_unlock(&t->lock);
   return ok;
+}
+/* UI copy with a small wait budget: a skipped copy leaves a stale anchor
+   (late lyrics); a 50ms wait almost always succeeds. */
+int tracker_wait_active(Tracker *t, Player *out) {
+  for (int i = 0; i < 5; i++) {
+    if (g_mutex_trylock(&t->lock)) {
+      const Player *a = NULL;
+      for (guint k = 0; k < t->players->len && !a; k++) {
+        const Player *q = t->players->pdata[k];
+        if (!strcmp(q->status, "Playing") && (*q->artist || *q->title)) a = q;
+      }
+      for (guint k = 0; k < t->players->len && !a; k++) {
+        const Player *q = t->players->pdata[k];
+        if (!strcmp(q->status, "Paused") && (*q->artist || *q->title)) a = q;
+      }
+      int ok = 0;
+      if (a) {
+        out->bus = g_strdup(a->bus); out->status = g_strdup(a->status);
+        out->artist = g_strdup(a->artist); out->title = g_strdup(a->title);
+        out->album = g_strdup(a->album); out->url = g_strdup(a->url);
+        out->meta_lyrics = g_strdup(a->meta_lyrics);
+        out->dur_us = a->dur_us; out->pos_us = a->pos_us; out->read_t = a->read_t;
+        ok = 1;
+      }
+      g_mutex_unlock(&t->lock);
+      return ok;
+    }
+    g_usleep(10 * 1000);
+  }
+  return tracker_try_active(t, out);
 }
 void tracker_copy_free(Player *p) {
   player_clear(p); /* embedded copy: free fields only, never the struct */
@@ -277,12 +304,18 @@ void tracker_read_positions(Tracker *t) {
       if (g_variant_is_of_type(v, G_VARIANT_TYPE_VARIANT)) {
         u = g_variant_get_variant(v); g_variant_unref(v);
       }
+      gint64 pos = p->pos_us;
       if (g_variant_is_of_type(u, G_VARIANT_TYPE_INT64))
-        p->pos_us = g_variant_get_int64(u);
+        pos = g_variant_get_int64(u);
       else if (g_variant_is_of_type(u, G_VARIANT_TYPE_UINT64))
-        p->pos_us = (gint64)g_variant_get_uint64(u);
+        pos = (gint64)g_variant_get_uint64(u);
       g_variant_unref(u);
-      p->read_t = g_get_monotonic_time() / 1e6;
+      if (pos != p->pos_us) {
+        /* value moved: this is a fresh sample, stamp it. Frozen repeats
+           keep the old stamp so interpolation stays truthful. */
+        p->pos_us = pos;
+        p->read_t = g_get_monotonic_time() / 1e6;
+      }
     }
   }
   g_mutex_unlock(&t->lock);

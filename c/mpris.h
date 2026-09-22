@@ -13,6 +13,7 @@ void tracker_read_positions(Tracker *t); /* live Position for Playing */
 void tracker_read_meta(Tracker *t);      /* live Status + Metadata for all */
 int tracker_try_active(Tracker *t, Player *out); /* non-blocking UI copy; 0 = keep last */
 void tracker_copy_free(Player *p);
+int tracker_wait_active(Tracker *t, Player *out);
 void tracker_request_resync(Tracker *t);
 void mpris_poke(void); /* implemented in main.c: schedule a UI check */
 void tracker_set_resync_ms(Tracker *t, int ms);

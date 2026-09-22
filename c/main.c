@@ -127,6 +127,17 @@ static gpointer fetch_thread(gpointer ud) {
 
 /* ---------- scheduler: no polling; each lyric gets its own timer ---------- */
 static double mono_now(void) { return g_get_monotonic_time() / 1e6; }
+/* anchor from a worker sample: trust ITS timestamp, not ours. The worker
+   only re-stamps read_t when the value actually moves, so a frozen repeat
+   keeps its original (truthful) time instead of looking fresh. */
+static void anchor_live(const Player *a, double live);
+static void anchor_from(const Player *a) {
+  anchor_live(a, a->pos_us / 1e6);
+}
+static void anchor_live(const Player *a, double live) {
+  if (a->read_t > 0) { G.anchor_pos = live; G.anchor_mono = a->read_t; }
+  else { G.anchor_pos = live; G.anchor_mono = mono_now(); }
+}
 /* authoritative position, interpolated locally between slow resyncs */
 static double pos_now(void) {
   double p = G.anchor_pos + (mono_now() - G.anchor_mono);
@@ -218,7 +229,7 @@ static void start_track(const Player *a, const char *key) {
   int gen = G.fetch_gen;
   g_free(G.shown_key); G.shown_key = g_strdup(""); G.shown_idx = -99;
   if (G.lyric_timer) { g_source_remove(G.lyric_timer); G.lyric_timer = 0; }
-  G.anchor_pos = a->pos_us / 1e6; G.anchor_mono = mono_now();
+  anchor_from(a);
   app_log("track-change %s status=%s", key, a->status);
   if (G.win) {
     char *lbl = g_strdup_printf("\u266A %s \u2026", key);
@@ -229,7 +240,7 @@ static void start_track(const Player *a, const char *key) {
     app_log("miss-cache %s: known missing, no network", key);
     g_free(G.track_key); G.track_key = g_strdup(key);
     g_free(G.loading_key); G.loading_key = g_strdup("");
-    G.anchor_pos = a->pos_us / 1e6; G.anchor_mono = mono_now();
+    anchor_from(a);
     if (G.win) overlay_show_status(G.win, "No lyrics found");
     return;
   }
@@ -258,7 +269,7 @@ static void check_state(void) {
   if (!G.tracker) return;
   reload_ini();
   Player tmp; memset(&tmp, 0, sizeof tmp);
-  if (tracker_try_active(G.tracker, &tmp)) {
+  if (tracker_wait_active(G.tracker, &tmp)) {
     tracker_copy_free(&G.cur);
     G.cur = tmp; G.have_cur = TRUE;
   }
@@ -287,14 +298,27 @@ static void check_state(void) {
   } else if (G.track_key && !strcmp(G.track_key, key) && G.lines.n) {
     /* reconcile worker position with our interpolation (seek detect) */
     double live = a->pos_us / 1e6;
-    double interp = G.anchor_pos + (mono_now() - G.anchor_mono);
-    if (a->read_t > 0 && fabs(live - interp) > 1.5) {
-      G.anchor_pos = live; G.anchor_mono = mono_now();
+    double nowm = mono_now();
+    double interp = G.anchor_pos + (nowm - G.anchor_mono);
+    double age = nowm - a->read_t;
+    if (live < interp - 1.5) {
+      if (a->read_t > 0 && age < 1.0) {
+        /* fresh read of an older position: real seek-back / replay */
+        anchor_live(a, live);
+        int idx = line_at(&G.lines, pos_now());
+        if (idx != G.shown_idx) paint_idx(key, idx);
+        app_log("seek %s -> %.1f", key, live);
+      }
+      /* else: frozen stale value; interpolation already advanced past it
+         truthfully. Ignore instead of yanking lyrics backwards. */
+    } else if (live > interp + 1.5) {
+      /* ahead: catch-up jump or seek-forward; this value is current */
+      anchor_live(a, live);
       int idx = line_at(&G.lines, pos_now());
       if (idx != G.shown_idx) paint_idx(key, idx);
       app_log("seek %s -> %.1f", key, live);
     } else if (a->read_t > 0) {
-      G.anchor_pos = live; G.anchor_mono = mono_now();
+      anchor_live(a, live);
     }
     int idx = line_at(&G.lines, pos_now());
     if (idx < G.shown_idx || idx - G.shown_idx > 5) paint_idx(key, idx);
