@@ -1,0 +1,8 @@
+__pycache__/
+.pytest_cache/
+*.o
+c/lyrics-overlay-c
+c/test-lo
+/tmp/lo-asan
+dist/*.deb
+dist/debroot/

@@ -1,0 +1,10 @@
+Package: lyrics-overlay
+Version: @VER@
+Section: sound
+Priority: optional
+Architecture: amd64
+Depends: python3, python3-gi, gir1.2-gtk-4.0, gir1.2-glib-2.0
+Maintainer: lyrics-overlay <local>
+Description: Lightweight DE-agnostic synced-lyrics overlay
+ Transparent draggable overlay showing synced lyrics for any MPRIS
+ player, with lrclib.net fallback. No desktop-environment lock-in.

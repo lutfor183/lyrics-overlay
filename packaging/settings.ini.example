@@ -1,0 +1,19 @@
+[display]
+font_family = Sans
+font_size = 22
+secondary_scale = 0.75
+text_color = #ffffff
+bg_color = #00000000
+bg_mode = transparent
+bg_custom_color = #00000000
+text_shadow = true
+width = 480
+anchor = bottom
+margin = 48
+poll_ms = 100
+lines = 1
+cache = true
+autohide = true
+autohide_timeout = 5
+sync_offset_ms = 350
+keep_above = true

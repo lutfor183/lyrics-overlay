@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=Lyrics Overlay
+GenericName=Lyrics Display
+Comment=Lightweight synced-lyrics overlay for any MPRIS player
+Exec=lyrics-overlay
+Icon=audio-x-generic
+Terminal=false
+Categories=AudioVideo;Audio;
+Keywords=lyrics;karaoke;mpris;
+StartupNotify=false
+Actions=Settings;
+
+[Desktop Action Settings]
+Name=Lyrics Overlay Settings
+Exec=lyrics-overlay --settings

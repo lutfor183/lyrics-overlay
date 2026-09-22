@@ -1,0 +1,12 @@
+[Unit]
+Description=Lyrics Overlay (any MPRIS player)
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/lyrics-overlay
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

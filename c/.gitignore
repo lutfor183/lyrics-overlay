@@ -1,0 +1,4 @@
+*.o
+lyrics-overlay-c
+test-lo
+/tmp/lo-asan
