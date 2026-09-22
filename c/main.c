@@ -326,7 +326,14 @@ static void check_state(void) {
       anchor_live(a, live);
     }
     int idx = line_at(&G.lines, pos_now());
-    if (idx < G.shown_idx || idx - G.shown_idx > 5) paint_idx(key, idx);
+    if (idx < G.shown_idx || idx - G.shown_idx > 5) {
+      gboolean rewound = idx < G.shown_idx - 1;
+      paint_idx(key, idx);
+      /* position rewound but key looks the same: the next song's metadata
+         may be lagging behind its audio. Re-read now to catch the change
+         instead of looping the old lyrics. */
+      if (rewound && G.tracker) tracker_request_resync(G.tracker);
+    }
     schedule_next();
   }
   g_free(key);
