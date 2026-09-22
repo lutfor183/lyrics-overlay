@@ -319,8 +319,9 @@ static void show_settings(Overlay *o) {
   dlg_row(grid, 0, "Lines", d->lines);
   const char *S[][2] = { {"auto", "Auto (best match)"}, {"local", "My .lrc files"},
     {"limusic", "limusic match"}, {"mpris", "From player"},
-    {"boidu", "Boidu"}, {"lrclib", "LRCLIB"} };
-  d->src = combo(S, 6, s->source ? s->source : "auto");
+    {"boidu", "Boidu"}, {"lrclib", "LRCLIB"},
+    {"netease", "Netease"}, {"qq", "QQ"}, {"kugou", "Kugou"} };
+  d->src = combo(S, 9, s->source ? s->source : "auto");
   dlg_row(grid, 1, "Lyrics source", d->src);
   d->font = gtk_entry_new();
   gtk_editable_set_text(GTK_EDITABLE(d->font), s->font_family);

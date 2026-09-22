@@ -81,7 +81,8 @@ static gboolean fetch_done_cb(gpointer ud) {
     paint_idx(d->key, line_at(&G.lines, pos_now()));
     schedule_next();
   } else {
-    if (d->cache) write_miss(d->artist, d->title, d->dur);
+    if (d->cache && d->artist && *d->artist && d->title && *d->title)
+      write_miss(d->artist, d->title, d->dur);
     if (G.win) overlay_show_status(G.win, "No lyrics found");
   }
 out:
@@ -99,6 +100,7 @@ static gpointer fetch_thread(gpointer ud) {
   int use_pin = 0;
   for (int i = 0; srcs[i]; i++)
     if (!strcmp(pinned, srcs[i])) use_pin = 1;
+  /* pinned source goes first; anything else is fallback (never stuck) */
   char *text = NULL; const char *where = NULL;
   if (use_pin) {
     char *one = run_source(pinned, f->artist, f->title, f->url, f->dur,
@@ -106,10 +108,12 @@ static gpointer fetch_thread(gpointer ud) {
     if (one && is_synced_lrc(one)) { text = one; where = pinned; }
     else g_free(one);
     app_log("sources %s pinned=%s hit=%d", f->key, pinned, text != NULL);
-  } else {
+  }
+  if (!text) {
     const char *w = NULL;
-    text = fetch_first_synced(f->artist, f->title, f->url, f->dur,
-                              f->album, meta_lyrics, &w);
+    text = fetch_first_synced_skip(f->artist, f->title, f->url, f->dur,
+                                   f->album, meta_lyrics, &w,
+                                   use_pin ? pinned : NULL);
     where = w;
     int nl = 0;
     if (text) for (const char *c = text; *c; c++) if (*c == '\n') nl++;

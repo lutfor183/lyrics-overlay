@@ -4,6 +4,9 @@
 char *fetch_first_synced(const char *artist, const char *title, const char *url,
                          double dur_s, const char *album, const char *meta_lyrics,
                          const char **src_name);
+char *fetch_first_synced_skip(const char *artist, const char *title, const char *url,
+                         double dur_s, const char *album, const char *meta_lyrics,
+                         const char **src_name, const char *skip);
 char *run_source(const char *src, const char *artist, const char *title,
                  const char *url, double dur_s, const char *album,
                  const char *meta_lyrics);

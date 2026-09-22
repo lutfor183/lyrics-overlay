@@ -10,7 +10,8 @@
 #include <sqlite3.h>
 
 static const char * const SOURCES[] =
-  { "local", "limusic", "mpris", "boidu", "lrclib", NULL };
+  { "local", "limusic", "mpris", "boidu", "lrclib",
+    "netease", "qq", "kugou", NULL };
 const char * const *lyric_sources(void) { return SOURCES; }
 
 /* ---------- http ---------- */
@@ -19,21 +20,69 @@ static SoupSession *session(void) {
   if (!s) { s = soup_session_new(); g_object_set(s, "timeout", 5, NULL); }
   return s;
 }
+static char *read_ok(SoupMessage *m, GBytes *b) {
+  char *out = NULL;
+  if (b && soup_message_get_status(m) == 200) {
+    gsize n = 0; const char *d = g_bytes_get_data(b, &n);
+    out = g_strndup(d, n);
+  }
+  return out;
+}
+/* one retry after 2s on rate-limit/server errors: at auto-change, two
+   clients (us + the player) burst the same API in the same second. */
+static int retryable(SoupMessage *m, GBytes *b) {
+  int s = soup_message_get_status(m);
+  return !b || s == 429 || s == 500 || s == 502 || s == 503;
+}
 static char *http_get(const char *url) {
   SoupMessage *m = soup_message_new("GET", url);
   if (!m) return NULL;
   soup_message_set_flags(m, SOUP_MESSAGE_NO_REDIRECT);
   GBytes *b = soup_session_send_and_read(session(), m, NULL, NULL);
-  char *out = NULL;
-  if (b && soup_message_get_status(m) == 200) {
-    gsize n = 0; const char *d = g_bytes_get_data(b, &n);
-    out = g_strndup(d, n);
+  char *out = read_ok(m, b);
+  if (!out && retryable(m, b)) {
+    if (b) g_bytes_unref(b);
+    g_usleep(2 * 1000 * 1000);
+    b = soup_session_send_and_read(session(), m, NULL, NULL);
+    out = read_ok(m, b);
   }
   if (b) g_bytes_unref(b);
   g_object_unref(m);
   return out;
 }
 static char *esc(const char *s) { return g_uri_escape_string(s ? s : "", NULL, TRUE); }
+static char *send_retry(SoupMessage *m) {
+  GBytes *b = soup_session_send_and_read(session(), m, NULL, NULL);
+  char *out = read_ok(m, b);
+  if (!out && retryable(m, b)) {
+    if (b) g_bytes_unref(b);
+    g_usleep(2 * 1000 * 1000);
+    b = soup_session_send_and_read(session(), m, NULL, NULL);
+    out = read_ok(m, b);
+  }
+  if (b) g_bytes_unref(b);
+  g_object_unref(m);
+  return out;
+}
+static char *http_post_form(const char *url, const char *form, const char *referer) {
+  SoupMessage *m = soup_message_new("POST", url);
+  if (!m) return NULL;
+  soup_message_set_flags(m, SOUP_MESSAGE_NO_REDIRECT);
+  if (referer) soup_message_headers_append(soup_message_get_request_headers(m),
+                                           "Referer", referer);
+  GBytes *body = g_bytes_new(form, strlen(form));
+  soup_message_set_request_body_from_bytes(m, "application/x-www-form-urlencoded", body);
+  g_bytes_unref(body);
+  return send_retry(m);
+}
+static char *http_get_referer(const char *url, const char *referer) {
+  SoupMessage *m = soup_message_new("GET", url);
+  if (!m) return NULL;
+  soup_message_set_flags(m, SOUP_MESSAGE_NO_REDIRECT);
+  if (referer) soup_message_headers_append(soup_message_get_request_headers(m),
+                                           "Referer", referer);
+  return send_retry(m);
+}
 
 /* ---------- cache ---------- */
 static void cache_key(const char *a, const char *t, double d, char out[64]) {
@@ -304,7 +353,23 @@ static char *limusic_lyrics(const char *artist, const char *title, double dur_s)
 
 /* ---------- boidu / lrclib ---------- */
 static const char *jstr(JsonObject *o, const char *m) {
-  return (o && json_object_has_member(o, m)) ? json_object_get_string_member(o, m) : NULL;
+  if (!o || !json_object_has_member(o, m)) return NULL;
+  JsonNode *n = json_object_get_member(o, m);
+  if (n && JSON_NODE_HOLDS_VALUE(n) &&
+      json_node_get_value_type(n) == G_TYPE_STRING)
+    return json_node_get_string(n);
+  return NULL;
+}
+/* numbers arrive as int or double depending on provider; read either */
+static double jnum(JsonObject *o, const char *m, int *has) {
+  if (has) *has = 0;
+  if (!o || !json_object_has_member(o, m)) return 0;
+  JsonNode *n = json_object_get_member(o, m);
+  if (!n || !JSON_NODE_HOLDS_VALUE(n)) return 0;
+  GType t = json_node_get_value_type(n);
+  if (t == G_TYPE_INT64) { if (has) *has = 1; return (double)json_node_get_int(n); }
+  if (t == G_TYPE_DOUBLE) { if (has) *has = 1; return json_node_get_double(n); }
+  return 0;
 }
 static char *fetch_boidu(const char *artist, const char *title,
                          const char *album, double dur_s) {
@@ -380,10 +445,16 @@ static char *fetch_lrclib_search(const char *artist, const char *title, double d
         JsonObject *o = json_array_get_object_element(arr, i);
         if (!o) continue;
         const char *sl = jstr(o, "syncedLyrics");
-        if (!sl || !*g_strstrip((char *)sl)) continue;
+        if (!sl || !*sl) continue;
+        { /* emptiness check on a copy: sl is borrowed parser memory */
+          char *tmp = g_strstrip(g_strdup(sl));
+          int empty = !*tmp;
+          g_free(tmp);
+          if (empty) continue;
+        }
         txt[m] = sl;
         if (json_object_has_member(o, "duration")) {
-          durs[m] = json_object_get_double_member(o, "duration"); has[m] = 1;
+          durs[m] = jnum(o, "duration", &has[m]);
         } else { durs[m] = 0; has[m] = 0; }
         m++;
       }
@@ -416,6 +487,225 @@ void write_miss(const char *a, const char *t, double d) {
   g_file_set_contents(p, "", 0, NULL);
 }
 
+
+/* ---------- fallback lane: only reached when faster sources miss ---------- */
+static char *fetch_netease(const char *artist, const char *title, double dur_s) {
+  if ((!artist || !*artist) && (!title || !*title)) return NULL;
+  char *q = g_strdup_printf("%s %s", title ? title : "", artist ? artist : "");
+  char *eq = esc(q); g_free(q);
+  char *form = g_strdup_printf("s=%s&type=1&limit=5&offset=0", eq); g_free(eq);
+  char *body = http_post_form("https://music.163.com/api/search/get", form,
+                              "https://music.163.com/");
+  g_free(form);
+  if (!body) return NULL;
+  long sid = 0;
+  JsonParser *p = json_parser_new();
+  if (json_parser_load_from_data(p, body, -1, NULL)) {
+    JsonNode *root = json_parser_get_root(p);
+    if (root && JSON_NODE_HOLDS_OBJECT(root)) {
+      JsonObject *o = json_node_get_object(root);
+      JsonObject *res = json_object_has_member(o, "result") ?
+                        json_object_get_object_member(o, "result") : NULL;
+      JsonArray *songs = (res && json_object_has_member(res, "songs")) ?
+                         json_object_get_array_member(res, "songs") : NULL;
+      if (songs) {
+        int n = json_array_get_length(songs);
+        double *durs = g_new(double, n); int *has = g_new(int, n);
+        for (int i = 0; i < n; i++) {
+          JsonObject *s = json_array_get_object_element(songs, i);
+          durs[i] = jnum(s, "duration", &has[i]) / 1000.0;
+        }
+        int b = best_dur_idx(n, durs, has, dur_s);
+        if (b >= 0) {
+          JsonObject *s = json_array_get_object_element(songs, b);
+          if (s && json_object_has_member(s, "id"))
+            sid = (long)json_object_get_int_member(s, "id");
+        }
+        g_free(durs); g_free(has);
+      }
+    }
+  }
+  g_object_unref(p); g_free(body);
+  if (!sid) return NULL;
+  char *url = g_strdup_printf("https://music.163.com/api/song/lyric?id=%ld&lv=1&kv=1&tv=-1", sid);
+  body = http_get_referer(url, "https://music.163.com/");
+  g_free(url);
+  if (!body) return NULL;
+  char *hit = NULL;
+  p = json_parser_new();
+  if (json_parser_load_from_data(p, body, -1, NULL)) {
+    JsonNode *root = json_parser_get_root(p);
+    if (root && JSON_NODE_HOLDS_OBJECT(root)) {
+      JsonObject *o = json_node_get_object(root);
+      JsonObject *lrc = json_object_has_member(o, "lrc") ?
+                        json_object_get_object_member(o, "lrc") : NULL;
+      const char *t = lrc ? jstr(lrc, "lyric") : NULL;
+      if (t && *t && is_synced_lrc(t)) hit = g_strdup(t);
+    }
+  }
+  g_object_unref(p); g_free(body);
+  return hit;
+}
+static char *maybe_b64(const char *s) {
+  if (!s) return NULL;
+  if ((int)strlen(s) > 200 && !strstr(s, "[")) {
+    gsize n = 0; guchar *d = g_base64_decode(s, &n);
+    if (d) { char *r = g_strndup((char *)d, n); g_free(d); return r; }
+  }
+  return g_strdup(s);
+}
+static char *fetch_qq(const char *artist, const char *title, double dur_s) {
+  if ((!artist || !*artist) && (!title || !*title)) return NULL;
+  char *q = g_strdup_printf("%s %s", title ? title : "", artist ? artist : "");
+  char *eq = esc(q); g_free(q);
+  char *url = g_strdup_printf("https://c.y.qq.com/soso/fcgi-bin/client_search_cp?w=%s&format=json", eq);
+  g_free(eq);
+  char *body = http_get_referer(url, "https://y.qq.com/");
+  g_free(url);
+  if (!body) return NULL;
+  char *mid = NULL;
+  JsonParser *p = json_parser_new();
+  if (json_parser_load_from_data(p, body, -1, NULL)) {
+    JsonNode *root = json_parser_get_root(p);
+    if (root && JSON_NODE_HOLDS_OBJECT(root)) {
+      JsonObject *o = json_node_get_object(root);
+      JsonObject *data = json_object_has_member(o, "data") ?
+                         json_object_get_object_member(o, "data") : NULL;
+      JsonObject *song = (data && json_object_has_member(data, "song")) ?
+                         json_object_get_object_member(data, "song") : NULL;
+      JsonArray *list = (song && json_object_has_member(song, "list")) ?
+                        json_object_get_array_member(song, "list") : NULL;
+      if (list) {
+        int n = json_array_get_length(list);
+        double *durs = g_new(double, n); int *has = g_new(int, n);
+        for (int i = 0; i < n; i++) {
+          JsonObject *s = json_array_get_object_element(list, i);
+          durs[i] = jnum(s, "interval", &has[i]);
+        }
+        int b = best_dur_idx(n, durs, has, dur_s);
+        if (b >= 0) {
+          JsonObject *s = json_array_get_object_element(list, b);
+          const char *m = (s && json_object_has_member(s, "songmid")) ?
+                          json_object_get_string_member(s, "songmid") : NULL;
+          if (m) mid = g_strdup(m);
+        }
+        g_free(durs); g_free(has);
+      }
+    }
+  }
+  g_object_unref(p); g_free(body);
+  if (!mid) return NULL;
+  url = g_strdup_printf("https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg"
+                        "?songmid=%s&format=json&nobase64=1", mid);
+  g_free(mid);
+  body = http_get_referer(url, "https://y.qq.com/");
+  g_free(url);
+  if (!body) return NULL;
+  char *hit = NULL;
+  p = json_parser_new();
+  if (json_parser_load_from_data(p, body, -1, NULL)) {
+    JsonNode *root = json_parser_get_root(p);
+    if (root && JSON_NODE_HOLDS_OBJECT(root)) {
+      const char *raw = jstr(json_node_get_object(root), "lyric");
+      if (raw && *raw) {
+        char *t = maybe_b64(raw);
+        if (t && is_synced_lrc(t)) hit = t; else g_free(t);
+      }
+    }
+  }
+  g_object_unref(p); g_free(body);
+  return hit;
+}
+static char *fetch_kugou(const char *artist, const char *title, double dur_s) {
+  if ((!artist || !*artist) && (!title || !*title)) return NULL;
+  char *q = g_strdup_printf("%s %s", title ? title : "", artist ? artist : "");
+  char *eq = esc(q); g_free(q);
+  char *url = g_strdup_printf("https://songsearch.kugou.com/song_search_v2?keyword=%s&page=1&pagesize=5", eq);
+  g_free(eq);
+  char *body = http_get(url);
+  g_free(url);
+  if (!body) return NULL;
+  char *hash = NULL;
+  JsonParser *p = json_parser_new();
+  if (json_parser_load_from_data(p, body, -1, NULL)) {
+    JsonNode *root = json_parser_get_root(p);
+    if (root && JSON_NODE_HOLDS_OBJECT(root)) {
+      JsonObject *o = json_node_get_object(root);
+      JsonObject *data = json_object_has_member(o, "data") ?
+                         json_object_get_object_member(o, "data") : NULL;
+      JsonArray *list = (data && json_object_has_member(data, "lists")) ?
+                        json_object_get_array_member(data, "lists") : NULL;
+      if (list) {
+        int n = json_array_get_length(list);
+        double *durs = g_new(double, n); int *has = g_new(int, n);
+        for (int i = 0; i < n; i++) {
+          JsonObject *s = json_array_get_object_element(list, i);
+          durs[i] = jnum(s, "Duration", &has[i]);
+        }
+        int b = best_dur_idx(n, durs, has, dur_s);
+        if (b >= 0) {
+          JsonObject *s = json_array_get_object_element(list, b);
+          const char *h = (s && json_object_has_member(s, "FileHash")) ?
+                          json_object_get_string_member(s, "FileHash") : NULL;
+          if (h) hash = g_strdup(h);
+        }
+        g_free(durs); g_free(has);
+      }
+    }
+  }
+  g_object_unref(p); g_free(body);
+  if (!hash) return NULL;
+  url = g_strdup_printf("https://krcs.kugou.com/search?ver=1&man=yes&client=mobi&hash=%s", hash);
+  g_free(hash);
+  body = http_get(url);
+  g_free(url);
+  if (!body) return NULL;
+  char *id = NULL, *ak = NULL;
+  p = json_parser_new();
+  if (json_parser_load_from_data(p, body, -1, NULL)) {
+    JsonNode *root = json_parser_get_root(p);
+    if (root && JSON_NODE_HOLDS_OBJECT(root)) {
+      JsonObject *o = json_node_get_object(root);
+      JsonArray *c = json_object_has_member(o, "candidates") ?
+                     json_object_get_array_member(o, "candidates") : NULL;
+      if (c && json_array_get_length(c) > 0) {
+        JsonObject *c0 = json_array_get_object_element(c, 0);
+        const char *i = (c0 && json_object_has_member(c0, "id")) ?
+                        json_object_get_string_member(c0, "id") : NULL;
+        const char *a = (c0 && json_object_has_member(c0, "accesskey")) ?
+                        json_object_get_string_member(c0, "accesskey") : NULL;
+        if (i && a) { id = g_strdup(i); ak = g_strdup(a); }
+      }
+    }
+  }
+  g_object_unref(p); g_free(body);
+  if (!id || !ak) { g_free(id); g_free(ak); return NULL; }
+  url = g_strdup_printf("https://lyrics.kugou.com/download?ver=1&client=pc&id=%s&accesskey=%s&fmt=lrc",
+                        id, ak);
+  g_free(id); g_free(ak);
+  body = http_get(url);
+  g_free(url);
+  if (!body) return NULL;
+  char *hit = NULL;
+  p = json_parser_new();
+  gsize n = 0; guchar *dec = NULL;
+  /* download body is {"content":"base64..."} */
+  if (json_parser_load_from_data(p, body, -1, NULL)) {
+    JsonNode *root = json_parser_get_root(p);
+    if (root && JSON_NODE_HOLDS_OBJECT(root)) {
+      const char *c = jstr(json_node_get_object(root), "content");
+      if (c && *c) dec = g_base64_decode(c, &n);
+    }
+  }
+  g_object_unref(p); g_free(body);
+  if (dec) {
+    char *t = g_strndup((char *)dec, n);
+    g_free(dec);
+    if (t && is_synced_lrc(t)) hit = t; else g_free(t);
+  }
+  return hit;
+}
+
 /* ---------- chain ---------- */
 char *run_source(const char *src, const char *artist, const char *title,
                  const char *url, double dur_s, const char *album,
@@ -424,7 +714,9 @@ char *run_source(const char *src, const char *artist, const char *title,
   if (!strcmp(src, "local")) return find_local(artist, title, url);
   if (!strcmp(src, "limusic")) return limusic_lyrics(artist, title, dur_s);
   if (!strcmp(src, "mpris")) {
-    if (meta_lyrics && *g_strstrip((char *)meta_lyrics))
+    /* NOTE: never g_strstrip() the caller's string in place (it may be a
+       literal or borrowed memory); normalize_text() copies first. */
+    if (meta_lyrics && *meta_lyrics)
       return normalize_text(meta_lyrics);
     return NULL;
   }
@@ -433,13 +725,23 @@ char *run_source(const char *src, const char *artist, const char *title,
     char *h = fetch_lrclib(artist, title, dur_s, album);
     return h ? h : fetch_lrclib_search(artist, title, dur_s);
   }
+  if (!strcmp(src, "netease")) return fetch_netease(artist, title, dur_s);
+  if (!strcmp(src, "qq")) return fetch_qq(artist, title, dur_s);
+  if (!strcmp(src, "kugou")) return fetch_kugou(artist, title, dur_s);
   return NULL;
 }
 char *fetch_first_synced(const char *artist, const char *title, const char *url,
                          double dur_s, const char *album, const char *meta_lyrics,
                          const char **src_name) {
+  return fetch_first_synced_skip(artist, title, url, dur_s, album, meta_lyrics,
+                                 src_name, NULL);
+}
+char *fetch_first_synced_skip(const char *artist, const char *title, const char *url,
+                         double dur_s, const char *album, const char *meta_lyrics,
+                         const char **src_name, const char *skip) {
   if (src_name) *src_name = NULL;
   for (int i = 0; SOURCES[i]; i++) {
+    if (skip && !strcmp(SOURCES[i], skip)) continue;
     char *h = run_source(SOURCES[i], artist, title, url, dur_s, album, meta_lyrics);
     if (h && is_synced_lrc(h)) {
       if (src_name) *src_name = SOURCES[i];

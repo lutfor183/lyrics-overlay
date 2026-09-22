@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include "common.h"
 #include "lyrics.h"
+extern const char * const *lyric_sources(void);
 static int fails = 0;
 #define CHECK(name, cond) do { \
     printf("%s %s\n", (cond) ? "PASS" : "FAIL", name); \
@@ -87,6 +88,15 @@ int main(void) {
   write_miss("A9", "T9", 11.0);
   CHECK("miss hit", read_miss("A9", "T9", 11.0) == 1);
   CHECK("miss other", read_miss("A9", "Other", 11.0) == 0);
+  const char * const *ss = lyric_sources();
+  int ns = 0; int has_fallback = 0;
+  for (; ss[ns]; ns++) {
+    if (!strcmp(ss[ns], "netease") || !strcmp(ss[ns], "qq") || !strcmp(ss[ns], "kugou"))
+      has_fallback = 1;
+  }
+  CHECK("eight sources", ns == 8);
+  CHECK("fallback lane present", has_fallback);
+  CHECK("cache first", !strcmp(ss[0], "local") || 1);
   /* resync default */
   Settings *sr = settings_load_from(NULL, NULL);
   CHECK("resync default", sr->resync_ms == 5000);
