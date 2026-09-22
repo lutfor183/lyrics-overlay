@@ -219,16 +219,19 @@ void overlay_refresh(Overlay *o, Settings *s) {
     gtk_window_present(GTK_WINDOW(o->win));
 }
 static void refit(Overlay *o) {
-  int minw = 0, natw = 0;
-  gtk_widget_measure(o->cur, GTK_ORIENTATION_HORIZONTAL, -1, &minw, &natw, NULL, NULL);
+  /* Stable geometry: the window is ALWAYS the full configured width and
+     text wraps inside it vertically. Resizing per line made the box jitter
+     and made the compositor drift its position. */
   int cap = o->s->width > 200 ? o->s->width : 200;
-  int w = natw + 36;
-  if (w > cap) w = cap;
-  /* height measured AT the final width: a long line wraps onto more rows
-     and the window grows instead of clipping it */
+  int w = cap;
   int minh = 0, nath = 0;
   gtk_widget_measure(o->root, GTK_ORIENTATION_VERTICAL, w, &minh, &nath, NULL, NULL);
-  gtk_window_set_default_size(GTK_WINDOW(o->win), w, nath);
+  if (nath < 1) nath = 1;
+  /* only touch the size when it really changed: every resize risks the
+     compositor nudging the window elsewhere */
+  int cw = gtk_widget_get_width(o->win), ch = gtk_widget_get_height(o->win);
+  if (abs(cw - w) > 1 || abs(ch - nath) > 1)
+    gtk_window_set_default_size(GTK_WINDOW(o->win), w, nath);
 }
 static void present(Overlay *o) {
   if (!gtk_widget_get_visible(o->win))
