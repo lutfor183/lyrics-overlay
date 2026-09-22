@@ -97,7 +97,8 @@ static gpointer fetch_thread(gpointer ud) {
   f->meta = NULL;
   char *pinned = (f->pin && *f->pin) ? f->pin : "auto";
   f->pin = NULL;
-  const char *srcs[] = { "local", "limusic", "mpris", "boidu", "lrclib", NULL };
+  const char *srcs[] = { "local", "limusic", "mpris", "boidu", "lrclib",
+                           "netease", "qq", "kugou", NULL };
   int use_pin = 0;
   for (int i = 0; srcs[i]; i++)
     if (!strcmp(pinned, srcs[i])) use_pin = 1;
@@ -344,8 +345,30 @@ static void check_state(void) {
   }
 }
 /* ---------- app ---------- */
+static void act_refresh(GSimpleAction *a, GVariant *p, gpointer u) {
+  (void)a; (void)p; (void)u; app_refresh(&G);
+}
+static void act_settings(GSimpleAction *a, GVariant *p, gpointer u) {
+  (void)a; (void)p; (void)u;
+  if (G.win) overlay_open_settings(G.win);
+}
+static void act_quit(GSimpleAction *a, GVariant *p, gpointer u) {
+  (void)a; (void)p; (void)u; app_quit(&G);
+}
 static void on_activate(GtkApplication *app, gpointer ud) {
   (void)ud;
+  {
+    static int actions_done = 0;
+    if (!actions_done) {
+      actions_done = 1;
+      const GActionEntry e[] = {
+        { "refresh", act_refresh, NULL, NULL, NULL, { 0 } },
+        { "settings", act_settings, NULL, NULL, NULL, { 0 } },
+        { "quit", act_quit, NULL, NULL, NULL, { 0 } },
+      };
+      g_action_map_add_action_entries(G_ACTION_MAP(app), e, 3, NULL);
+    }
+  }
   if (!G.win) {
     G.win = overlay_new(app, G.s, &G);
     GDBusConnection *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);

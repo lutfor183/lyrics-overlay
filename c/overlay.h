@@ -10,6 +10,7 @@ void overlay_show_lyrics(Overlay *o, const char *prev, const char *cur, const ch
 void overlay_show_single(Overlay *o, const char *cur);
 void overlay_show_status(Overlay *o, const char *text);
 void overlay_set_playing(Overlay *o, gboolean playing);
+void overlay_open_settings(Overlay *o);
 char *overlay_dump(Overlay *o);
 /* callbacks implemented in main.c */
 void app_refresh(App *a);

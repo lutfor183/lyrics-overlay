@@ -84,30 +84,48 @@ static void on_drag_begin(GtkGestureDrag *g, double x, double y, gpointer ud) {
   gdk_toplevel_begin_move(tl, dev, 1, x, y, GDK_CURRENT_TIME);
   app_log("drag: move started");
 }
-static void menu_btn(GtkWidget *box, const char *label, GCallback fn, gpointer ud, Overlay *o) {
-  GtkWidget *b = gtk_button_new_with_label(label);
-  gtk_button_set_has_frame(GTK_BUTTON(b), FALSE);
-  gtk_widget_set_halign(b, GTK_ALIGN_FILL);
-  g_signal_connect_swapped(b, "clicked", fn, ud);
-  g_signal_connect_swapped(b, "clicked", G_CALLBACK(gtk_popover_popdown), o->menu);
-  gtk_box_append(GTK_BOX(box), b);
+static void menu_item_with_icon(GMenu *m, const char *label,
+                                const char *action, const char *icon) {
+  GMenuItem *it = g_menu_item_new(label, action);
+  if (icon) {
+    GIcon *ic = g_themed_icon_new(icon);
+    g_menu_item_set_icon(it, ic);
+    g_object_unref(ic);
+  }
+  g_menu_append_item(m, it);
+  g_object_unref(it);
 }
-static void show_settings(Overlay *o);
 static void on_right(GtkGestureClick *g, int n, double x, double y, gpointer ud) {
   (void)g; (void)n;
   Overlay *o = ud;
   if (o->menu) gtk_popover_popdown(GTK_POPOVER(o->menu));
-  GtkWidget *pop = gtk_popover_new();
-  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-  gtk_widget_set_margin_top(box, 6); gtk_widget_set_margin_bottom(box, 6);
-  gtk_widget_set_margin_start(box, 6); gtk_widget_set_margin_end(box, 6);
-  menu_btn(box, "Refresh lyrics", G_CALLBACK(app_refresh), o->cb, o);
-  menu_btn(box, "Settings...", G_CALLBACK(show_settings), o, o);
-  menu_btn(box, "Quit", G_CALLBACK(app_quit), o->cb, o);
-  gtk_popover_set_child(GTK_POPOVER(pop), box);
+  const char *cur = gtk_label_get_text(GTK_LABEL(o->cur));
+  char *hdr;
+  if (cur && *cur && strcmp(cur, "\u266A") != 0) {
+    if (g_utf8_strlen(cur, -1) > 42) {
+      char *sub = g_utf8_substring(cur, 0, 40);
+      hdr = g_strdup_printf("\u266A %s\u2026", sub);
+      g_free(sub);
+    } else {
+      hdr = g_strdup_printf("\u266A %s", cur);
+    }
+  } else {
+    hdr = g_strdup("Lyrics Overlay");
+  }
+  GMenu *model = g_menu_new();
+  GMenu *sec = g_menu_new();
+  menu_item_with_icon(sec, "Refresh lyrics", "app.refresh", "view-refresh");
+  menu_item_with_icon(sec, "Settings\u2026", "app.settings", "preferences-system");
+  menu_item_with_icon(sec, "Quit", "app.quit", "application-exit");
+  g_menu_append_section(model, hdr, G_MENU_MODEL(sec));
+  g_object_unref(sec);
+  g_free(hdr);
+  GtkWidget *pop = gtk_popover_menu_new_from_model(G_MENU_MODEL(model));
+  g_object_unref(model);
   gtk_widget_set_parent(pop, o->win);
   GdkRectangle r = { (int)x, (int)y, 1, 1 };
   gtk_popover_set_pointing_to(GTK_POPOVER(pop), &r);
+  gtk_widget_set_size_request(pop, 220, -1);
   gtk_popover_popup(GTK_POPOVER(pop));
   o->menu = pop;
   app_log("menu: popped");
@@ -235,6 +253,7 @@ typedef struct {
   Overlay *o;
   GtkWidget *dlg, *lines, *src, *font, *fsize, *scale, *color, *bg,
             *width, *anchor, *margin, *poll, *autohide, *timeout,
+            *bgcolor,
             *cache, *sync;
 } Dlg;
 static void dlg_row(GtkWidget *grid, int row, const char *label, GtkWidget *w) {
@@ -246,6 +265,33 @@ static void dlg_row(GtkWidget *grid, int row, const char *label, GtkWidget *w) {
   gtk_widget_set_halign(w, GTK_ALIGN_END);
   gtk_widget_set_hexpand(w, TRUE);
   gtk_grid_attach(GTK_GRID(grid), w, 1, row, 1, 1);
+}
+static int parse_rrggbbaa(const char *s, GdkRGBA *out) {
+  if (!s) return 0;
+  if (*s == '#') s++;
+  int n = strlen(s);
+  if (n != 6 && n != 8) return 0;
+  char *e = NULL;
+  unsigned long v = strtoul(s, &e, 16);
+  if (!e || *e) return 0;
+  if (n == 6) v = (v << 8) | 0xFF;
+  out->red = ((v >> 24) & 255) / 255.0;
+  out->green = ((v >> 16) & 255) / 255.0;
+  out->blue = ((v >> 8) & 255) / 255.0;
+  out->alpha = (v & 255) / 255.0;
+  return 1;
+}
+static char *rgba_hex(const GdkRGBA *c) {
+  int v[4];
+  v[0] = (int)(c->red * 255 + 0.5); v[1] = (int)(c->green * 255 + 0.5);
+  v[2] = (int)(c->blue * 255 + 0.5); v[3] = (int)(c->alpha * 255 + 0.5);
+  for (int i = 0; i < 4; i++) { if (v[i] < 0) v[i] = 0; if (v[i] > 255) v[i] = 255; }
+  return g_strdup_printf("#%02X%02X%02X%02X", v[0], v[1], v[2], v[3]);
+}
+static void bg_changed(GtkComboBox *c, gpointer ud) {
+  Dlg *d = ud;
+  const char *v = gtk_combo_box_get_active_id(c);
+  gtk_widget_set_sensitive(d->bgcolor, v && !strcmp(v, "custom"));
 }
 static GtkWidget *combo(const char *ids[][2], int n, const char *active) {
   GtkWidget *c = gtk_combo_box_text_new();
@@ -270,6 +316,12 @@ static void dlg_apply(GtkButton *b, gpointer ud) {
   s->text_color = gdk_rgba_to_string(&rgba);
   g_free(s->bg_mode);
   s->bg_mode = g_strdup(gtk_combo_box_get_active_id(GTK_COMBO_BOX(d->bg)) ?: "transparent");
+  {
+    GdkRGBA br;
+    gtk_color_chooser_get_rgba(GTK_COLOR_CHOOSER(d->bgcolor), &br);
+    g_free(s->bg_custom_color);
+    s->bg_custom_color = rgba_hex(&br);
+  }
   s->width = (int)gtk_spin_button_get_value(GTK_SPIN_BUTTON(d->width));
   g_free(s->anchor);
   s->anchor = g_strdup(gtk_combo_box_get_active_id(GTK_COMBO_BOX(d->anchor)) ?: "bottom");
@@ -294,6 +346,8 @@ static void dlg_apply(GtkButton *b, gpointer ud) {
   gtk_window_destroy(GTK_WINDOW(d->dlg));
   /* d is freed by the destroy handler */
 }
+static void show_settings(Overlay *o);
+void overlay_open_settings(Overlay *o) { show_settings(o); }
 static void show_settings(Overlay *o) {
   app_log("settings dialog opened");
   Settings *s = o->s;
@@ -340,30 +394,46 @@ static void show_settings(Overlay *o) {
     {"light", "Light shade"}, {"custom", "Custom color"} };
   d->bg = combo(B, 4, s->bg_mode);
   dlg_row(grid, 6, "Background", d->bg);
+  d->bgcolor = gtk_color_button_new();
+  gtk_color_chooser_set_use_alpha(GTK_COLOR_CHOOSER(d->bgcolor), TRUE);
+  {
+    GdkRGBA br = { 0, 0, 0, 0 };
+    if (!parse_rrggbbaa(s->bg_custom_color, &br))
+      gdk_rgba_parse(&br, "#00000000");
+    gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(d->bgcolor), &br);
+  }
+  gtk_widget_set_tooltip_text(d->bgcolor,
+      "Used when Background is Custom color (alpha = transparency)");
+  dlg_row(grid, 7, "Custom background", d->bgcolor);
+  {
+    const char *bv = gtk_combo_box_get_active_id(GTK_COMBO_BOX(d->bg));
+    gtk_widget_set_sensitive(d->bgcolor, bv && !strcmp(bv, "custom"));
+  }
+  g_signal_connect(d->bg, "changed", G_CALLBACK(bg_changed), d);
   d->width = gtk_spin_button_new_with_range(200, 1200, 10);
   gtk_spin_button_set_value(GTK_SPIN_BUTTON(d->width), s->width);
-  dlg_row(grid, 7, "Window width", d->width);
+  dlg_row(grid, 8, "Window width", d->width);
   const char *A[][2] = { {"bottom", "Bottom"}, {"top", "Top"} };
   d->anchor = combo(A, 2, s->anchor);
-  dlg_row(grid, 8, "Anchor", d->anchor);
+  dlg_row(grid, 9, "Anchor", d->anchor);
   d->margin = gtk_spin_button_new_with_range(0, 200, 1);
   gtk_spin_button_set_value(GTK_SPIN_BUTTON(d->margin), s->margin);
-  dlg_row(grid, 9, "Margin", d->margin);
+  dlg_row(grid, 10, "Margin", d->margin);
   d->poll = gtk_spin_button_new_with_range(1000, 30000, 1000);
   gtk_spin_button_set_value(GTK_SPIN_BUTTON(d->poll), s->resync_ms);
-  dlg_row(grid, 10, "Position resync (ms)", d->poll);
+  dlg_row(grid, 11, "Position resync (ms)", d->poll);
   d->autohide = gtk_switch_new();
   gtk_switch_set_active(GTK_SWITCH(d->autohide), s->autohide);
-  dlg_row(grid, 11, "Autohide", d->autohide);
+  dlg_row(grid, 12, "Autohide", d->autohide);
   d->timeout = gtk_spin_button_new_with_range(1, 30, 1);
   gtk_spin_button_set_value(GTK_SPIN_BUTTON(d->timeout), s->autohide_timeout);
-  dlg_row(grid, 12, "Autohide timeout (s)", d->timeout);
+  dlg_row(grid, 13, "Autohide timeout (s)", d->timeout);
   d->cache = gtk_switch_new();
   gtk_switch_set_active(GTK_SWITCH(d->cache), s->cache);
-  dlg_row(grid, 14, "Cache lyrics", d->cache);
+  dlg_row(grid, 15, "Cache lyrics", d->cache);
   d->sync = gtk_spin_button_new_with_range(-2000, 2000, 50);
   gtk_spin_button_set_value(GTK_SPIN_BUTTON(d->sync), s->sync_offset_ms);
-  dlg_row(grid, 15, "Show early (ms)", d->sync);
+  dlg_row(grid, 16, "Show early (ms)", d->sync);
   GtkWidget *btns = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
   gtk_widget_set_halign(btns, GTK_ALIGN_END);
   gtk_box_append(GTK_BOX(box), btns);
